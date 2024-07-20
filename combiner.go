@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -18,9 +19,9 @@ func NewCombiner(config CombinerConfig) (*Combiner, error) {
 		return nil, fmt.Errorf("poolSize * windowSize must be less than 20000")
 	}
 
-	onConnErr := func(tunnelId TunnelId, conn net.Conn, err error) {}
+	onError := func(tunnelId TunnelId, conn net.Conn, err error) {}
 	if config.OnError != nil {
-		onConnErr = config.OnError
+		onError = config.OnError
 	}
 
 	bufferPool := &sync.Pool{
@@ -35,19 +36,22 @@ func NewCombiner(config CombinerConfig) (*Combiner, error) {
 
 	for i := 0; i < config.PoolSize; i++ {
 		writeQueue := newWriteQueue(config.WindowSize, writeChan)
-		tunnels[i] = newTunnel(i, sorterReadQueue, writeQueue, bufferPool, onConnErr, config.AckTimeout, ackDelay)
+		tunnels[i] = newTunnel(i, sorterReadQueue, writeQueue, bufferPool, onError, config.AckTimeout, ackDelay)
 	}
 
 	combiner := &Combiner{
 		tag:         config.Tag,
 		packetSize:  config.PacketSize,
 		poolSize:    config.PoolSize,
-		onConnError: onConnErr,
+		onConnError: onError,
 		sorterQueue: sorterReadQueue,
 		tunnels:     tunnels,
-		lock:        &sync.Mutex{},
+		seqLock:     &sync.Mutex{},
+		readLock:    &sync.Mutex{},
+		writeLock:   &sync.Mutex{},
 		bufferPool:  bufferPool,
 		writeChan:   writeChan,
+		closed:      &atomic.Bool{},
 	}
 
 	if err := combiner.start(); err != nil {
@@ -70,21 +74,23 @@ type CombinerConfig struct {
 }
 
 type Combiner struct {
-	packetSize    int
-	poolSize      int
-	lock          *sync.Mutex
-	onConnError   OnConnErrorFunc
-	tunnels       []*tunnel
-	readDeadline  *time.Time
-	writeDeadline *time.Time
-	sorterQueue   *readQueue
-	packetReading *packet
-	packetPointer int
-	sequenceId    uint16
-	bufferPool    *sync.Pool
-	writeChan     chan *packet
-	closed        bool
-	tag           string
+	packetSize     int
+	poolSize       int
+	sequenceId     uint16
+	seqLock        *sync.Mutex
+	readLock       *sync.Mutex
+	writeLock      *sync.Mutex
+	tunnels        []*tunnel
+	readDeadline   *time.Time
+	writeDeadline  *time.Time
+	sorterQueue    *readQueue
+	readingPacket  *packet
+	readingPointer int
+	bufferPool     *sync.Pool
+	writeChan      chan *packet
+	closed         *atomic.Bool
+	tag            string
+	onConnError    OnConnErrorFunc
 }
 
 func (c *Combiner) LocalAddr() net.Addr {
@@ -93,6 +99,54 @@ func (c *Combiner) LocalAddr() net.Addr {
 
 func (c *Combiner) RemoteAddr() net.Addr {
 	return &net.TCPAddr{}
+}
+
+func (c *Combiner) Read(b []byte) (int, error) {
+	if c.closed.Load() {
+		return 0, io.ErrClosedPipe
+	}
+
+	c.readLock.Lock()
+	defer c.readLock.Unlock()
+
+	deadline := c.readDeadline
+	n := 0
+	for {
+		if c.readingPacket == nil {
+			if c.closed.Load() {
+				return n, io.ErrClosedPipe
+			}
+
+			gotPacket, ok, err := c.readUntilDeadline(deadline)
+			if err != nil {
+				return n, err
+			}
+			if !ok {
+				return n, io.ErrClosedPipe
+			}
+
+			c.readingPacket = gotPacket
+			c.readingPointer = 0
+		}
+
+		unreadPayload := c.readingPacket.data()[c.readingPointer:]
+		readPayloadSize := min(len(b)-n, len(unreadPayload))
+		copy(b[n:], unreadPayload[:readPayloadSize])
+
+		c.readingPointer += readPayloadSize
+		n += readPayloadSize
+
+		if readPayloadSize == len(unreadPayload) {
+			c.bufferPool.Put(c.readingPacket.buff)
+			c.readingPacket = nil
+		}
+
+		if n >= len(b) {
+			break
+		}
+	}
+
+	return n, nil
 }
 
 func (c *Combiner) readUntilDeadline(deadline *time.Time) (packet *packet, ok bool, err error) {
@@ -117,50 +171,39 @@ func (c *Combiner) readUntilDeadline(deadline *time.Time) (packet *packet, ok bo
 	return
 }
 
-func (c *Combiner) Read(b []byte) (int, error) {
-	if c.closed {
+func (c *Combiner) Write(b []byte) (n int, err error) {
+	if c.closed.Load() {
 		return 0, io.ErrClosedPipe
 	}
 
-	deadline := c.readDeadline
-	readBuffPointer := 0
+	c.writeLock.Lock()
+	defer c.writeLock.Unlock()
+
+	deadline := c.writeDeadline
+	pointerStart := 0
+
 	for {
-		if c.packetReading == nil {
-			if c.closed {
-				return 0, io.ErrClosedPipe
-			}
-
-			packet, ok, err := c.readUntilDeadline(deadline)
-			if err != nil && readBuffPointer == 0 {
-				return 0, err
-			}
-
-			if !ok {
-				c.closed = true
-			}
-
-			c.packetReading = packet
-			c.packetPointer = 0
+		if c.closed.Load() {
+			return 0, io.ErrClosedPipe
 		}
 
-		unreadPayload := c.packetReading.data()[c.packetPointer:]
-		endPointer := min(len(b)-readBuffPointer, len(unreadPayload))
-		copy(b[readBuffPointer:], unreadPayload[:endPointer])
+		pointerEnd := pointerStart + min(c.packetSize, len(b)-pointerStart)
+		packetData := b[pointerStart:pointerEnd]
 
-		c.packetPointer += endPointer
-		readBuffPointer += endPointer
+		buff := c.bufferPool.Get().([]byte)
+		seqId := c.nextSequenceId()
 
-		if endPointer == len(unreadPayload) {
-			c.bufferPool.Put(c.packetReading.buff)
-			c.packetReading = nil
+		packet := newPacket(buff, seqId, packetData)
+
+		if err := c.writeUntilDeadline(packet, deadline); err != nil {
+			return pointerStart, err
 		}
 
-		if readBuffPointer >= len(b) {
-			break
+		pointerStart = pointerEnd
+		if pointerEnd == len(b) {
+			return pointerStart, nil
 		}
 	}
-
-	return readBuffPointer, nil
 }
 
 func (c *Combiner) writeUntilDeadline(packet *packet, deadline *time.Time) error {
@@ -184,39 +227,13 @@ func (c *Combiner) writeUntilDeadline(packet *packet, deadline *time.Time) error
 	return nil
 }
 
-func (c *Combiner) Write(b []byte) (n int, err error) {
-	if c.closed {
-		return 0, io.ErrClosedPipe
-	}
-
-	deadline := c.writeDeadline
-	pointerStart := 0
-
-	for {
-		if c.closed {
-			return 0, io.ErrClosedPipe
-		}
-
-		pointerEnd := pointerStart + min(c.packetSize, len(b)-pointerStart)
-		packetData := b[pointerStart:pointerEnd]
-
-		buff := c.bufferPool.Get().([]byte)
-		seqId := c.nextSequenceId()
-
-		packet := newPacket(buff, seqId, packetData)
-
-		if err := c.writeUntilDeadline(packet, deadline); err != nil {
-			return pointerStart, err
-		}
-
-		pointerStart = pointerEnd
-		if pointerEnd == len(b) {
-			return pointerStart, nil
-		}
-	}
-}
-
 func (c *Combiner) Close() error {
+	c.readLock.Lock()
+	defer c.readLock.Unlock()
+
+	c.writeLock.Lock()
+	defer c.writeLock.Unlock()
+
 	c.sorterQueue.stop()
 
 	for _, tunnel := range c.tunnels {
@@ -279,8 +296,8 @@ func (c *Combiner) GetPoolSize() int {
 }
 
 func (c *Combiner) nextSequenceId() uint16 {
-	c.lock.Lock()
-	defer c.lock.Unlock()
+	c.seqLock.Lock()
+	defer c.seqLock.Unlock()
 
 	seqId := c.sequenceId
 	c.sequenceId += 1
