@@ -147,12 +147,13 @@ func (c *Combiner) Read(b []byte) (int, error) {
 		endPointer := min(len(b)-readBuffPointer, len(unreadPayload))
 		copy(b[readBuffPointer:], unreadPayload[:endPointer])
 
+		c.packetPointer += endPointer
+		readBuffPointer += endPointer
+
 		if endPointer == len(unreadPayload) {
 			c.bufferPool.Put(c.packetReading.buff)
 			c.packetReading = nil
 		}
-
-		readBuffPointer += endPointer
 
 		if readBuffPointer >= len(b) {
 			break
