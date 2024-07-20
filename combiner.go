@@ -35,7 +35,7 @@ func NewCombiner(config CombinerConfig) (*Combiner, error) {
 
 	for i := 0; i < config.PoolSize; i++ {
 		writeQueue := newWriteQueue(config.WindowSize, writeChan)
-		tunnels[i] = newTunnel(i, sorterReadQueue, writeQueue, bufferPool, config.OnError, config.AckTimeout, ackDelay)
+		tunnels[i] = newTunnel(i, sorterReadQueue, writeQueue, bufferPool, onConnErr, config.AckTimeout, ackDelay)
 	}
 
 	combiner := &Combiner{
