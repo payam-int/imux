@@ -10,6 +10,11 @@ import (
 	"time"
 )
 
+// NewCombiner creates a new Combiner instance based on the provided configuration.
+// To the Combiner, provide it with a sufficient number of connections using the SetConn method
+// and When a connection closes, replace it with a new connection having the same TunnelId.
+//
+// To receive handle connection close event, provide an OnError function within the CombinerConfig.
 func NewCombiner(config CombinerConfig) (*Combiner, error) {
 	if config.PacketSize > 65500 {
 		return nil, fmt.Errorf("packet size must be less than 65500")
@@ -65,15 +70,30 @@ func NewCombiner(config CombinerConfig) (*Combiner, error) {
 
 type OnConnErrorFunc = func(tunnelId TunnelId, conn net.Conn, err error)
 
+// CombinerConfig holds configuration parameters for the Combiner.
 type CombinerConfig struct {
-	Tag        string
-	PoolSize   int
+	// Tag is an arbitrary name for the Combiner instance
+	Tag string
+
+	// PoolSize specifies the  number of underlying connections.
+	PoolSize int
+
+	// WindowSize defines the maximum number of unacknowledged packets.
 	WindowSize int
+
+	// PacketSize sets the size of data packets to be sent.
 	PacketSize int
-	OnError    OnConnErrorFunc
+
+	// OnError is a callback function invoked when an error occurs.
+	OnError OnConnErrorFunc
+
+	// AckTimeout is the duration to wait for a packet to send before sending an empty packet with ack.
 	AckTimeout time.Duration
 }
 
+// Combiner is a net.Conn implementation that distributes data across multiple underlying connections
+// The overall throughput is limited by the slowest connection. For a pool size of n and the slowest
+// connection throughput of s, the maximum achievable throughput is n * s.
 type Combiner struct {
 	packetSize     int
 	poolSize       int
@@ -94,14 +114,17 @@ type Combiner struct {
 	onConnError    OnConnErrorFunc
 }
 
+// LocalAddr returns an empty net.TCPAddr to satisfy the net.Conn interface.
 func (c *Combiner) LocalAddr() net.Addr {
 	return &net.TCPAddr{}
 }
 
+// RemoteAddr returns an empty net.TCPAddr to satisfy the net.Conn interface.
 func (c *Combiner) RemoteAddr() net.Addr {
 	return &net.TCPAddr{}
 }
 
+// Read implements the net.Conn interface and behaves identically to net.Conn.Read.
 func (c *Combiner) Read(b []byte) (int, error) {
 	if c.closed.Load() {
 		return 0, io.ErrClosedPipe
@@ -172,6 +195,7 @@ func (c *Combiner) readUntilDeadline(deadline *time.Time) (packet *packet, ok bo
 	return
 }
 
+// Write implements the net.Conn interface and behaves identically to net.Conn.Write.
 func (c *Combiner) Write(b []byte) (n int, err error) {
 	if c.closed.Load() {
 		return 0, io.ErrClosedPipe
@@ -228,6 +252,7 @@ func (c *Combiner) writeUntilDeadline(packet *packet, deadline *time.Time) error
 	return nil
 }
 
+// Close implements the net.Conn interface and behaves identically to net.Conn.Close.
 func (c *Combiner) Close() error {
 	c.readLock.Lock()
 	defer c.readLock.Unlock()
@@ -256,6 +281,7 @@ func (c *Combiner) start() error {
 	return nil
 }
 
+// SetDeadline implements the net.Conn interface and behaves identically to net.Conn.SetDeadline.
 func (c *Combiner) SetDeadline(t time.Time) error {
 	_ = c.SetReadDeadline(t)
 	_ = c.SetWriteDeadline(t)
@@ -263,24 +289,29 @@ func (c *Combiner) SetDeadline(t time.Time) error {
 	return nil
 }
 
+// SetReadDeadline implements the net.Conn interface and behaves identically to net.Conn.SetReadDeadline.
 func (c *Combiner) SetReadDeadline(t time.Time) error {
 	c.readDeadline = &t
 	return nil
 }
 
+// SetWriteDeadline implements the net.Conn interface and behaves identically to net.Conn.SetWriteDeadline.
 func (c *Combiner) SetWriteDeadline(t time.Time) error {
 	c.writeDeadline = &t
 	return nil
 }
 
-func (c *Combiner) SetConn(tunnelId TunnelId, conn net.Conn) error {
-	return c.tunnels[tunnelId].bind(conn)
+// SetConn sets the underlying connection for the specified tunnelId.
+func (c *Combiner) SetConn(tunnelId TunnelId, conn net.Conn) {
+	c.tunnels[tunnelId].bind(conn)
 }
 
-func (c *Combiner) DeleteConn(tunnelId TunnelId) error {
-	return c.tunnels[tunnelId].unbind()
+// DeleteConn removes the underlying connection associated with the specified tunnelId.
+func (c *Combiner) DeleteConn(tunnelId TunnelId) {
+	c.tunnels[tunnelId].unbind()
 }
 
+// GetActiveConnections returns the number of active underlying connections.
 func (c *Combiner) GetActiveConnections() int {
 	activeConnections := 0
 	for _, tunnel := range c.tunnels {
@@ -292,6 +323,7 @@ func (c *Combiner) GetActiveConnections() int {
 	return activeConnections
 }
 
+// GetPoolSize returns the maximum number of underlying connections.
 func (c *Combiner) GetPoolSize() int {
 	return c.poolSize
 }

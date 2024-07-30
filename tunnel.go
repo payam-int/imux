@@ -120,23 +120,21 @@ func (t *tunnel) writePacket(packet *packet) {
 	return
 }
 
-func (t *tunnel) bind(conn net.Conn) error {
+func (t *tunnel) bind(conn net.Conn) {
 	t.connLock.Lock()
 	defer t.connLock.Unlock()
 
 	t.conn = conn
 	t.connCond.Broadcast()
-	return nil
 }
 
-func (t *tunnel) unbind() error {
+func (t *tunnel) unbind() {
 	t.connLock.Lock()
 	defer t.connLock.Unlock()
 
 	t.conn = nil
 	t.writeQueue.resetPointer()
 	t.connCond.Broadcast()
-	return nil
 }
 
 func (t *tunnel) hasConnection() bool {
