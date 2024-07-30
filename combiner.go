@@ -11,12 +11,12 @@ import (
 )
 
 func NewCombiner(config CombinerConfig) (*Combiner, error) {
-	if config.PacketSize > 10000 {
-		return nil, fmt.Errorf("packet size must be less than 10000")
+	if config.PacketSize > 65500 {
+		return nil, fmt.Errorf("packet size must be less than 65500")
 	}
 
-	if config.PoolSize*config.WindowSize > 20000 {
-		return nil, fmt.Errorf("poolSize * windowSize must be less than 20000")
+	if config.PoolSize*config.WindowSize > 65500 {
+		return nil, fmt.Errorf("poolSize * windowSize must be less than 65500")
 	}
 
 	onError := func(tunnelId TunnelId, conn net.Conn, err error) {}
@@ -29,14 +29,15 @@ func NewCombiner(config CombinerConfig) (*Combiner, error) {
 			return make([]byte, config.PacketSize+PacketOverhead)
 		},
 	}
+
 	tunnels := make([]*tunnel, config.PoolSize)
-	sorterReadQueue := newReadQueue(config.WindowSize, config.PoolSize)
+	sorterQueue := newReadQueue(config.WindowSize, config.PoolSize)
 	writeChan := make(chan *packet, config.PoolSize)
 	ackDelay := max(config.WindowSize/2, 1)
 
 	for i := 0; i < config.PoolSize; i++ {
-		writeQueue := newWriteQueue(config.WindowSize, writeChan)
-		tunnels[i] = newTunnel(i, sorterReadQueue, writeQueue, bufferPool, onError, config.AckTimeout, ackDelay)
+		tunWriteQueue := newWriteQueue(config.WindowSize, writeChan)
+		tunnels[i] = newTunnel(i, sorterQueue, tunWriteQueue, bufferPool, onError, config.AckTimeout, ackDelay)
 	}
 
 	combiner := &Combiner{
@@ -44,7 +45,7 @@ func NewCombiner(config CombinerConfig) (*Combiner, error) {
 		packetSize:  config.PacketSize,
 		poolSize:    config.PoolSize,
 		onConnError: onError,
-		sorterQueue: sorterReadQueue,
+		sorterQueue: sorterQueue,
 		tunnels:     tunnels,
 		seqLock:     &sync.Mutex{},
 		readLock:    &sync.Mutex{},
