@@ -22,7 +22,7 @@ type readQueue struct {
 	lock           *sync.Mutex
 	cond           *sync.Cond
 	closed         *atomic.Bool
-	nextSeqId      uint16
+	nextSeqId      uint32
 	pointer        int
 }
 

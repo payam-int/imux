@@ -68,31 +68,31 @@ func (t *tunnel) read() {
 	conn := t.waitForConn()
 
 	buff := t.bufferPool.Get().([]byte)
-	packet, err := readPacket(conn, buff)
+	gotPacket, err := readPacket(conn, buff)
 	if err != nil {
 		t.onConnError(t.tunnelId, conn, err)
 		return
 	}
 
-	if packet.isAck() {
-		if packet.ackId == math.MaxUint16 {
+	if gotPacket.isAck() {
+		if gotPacket.ackId == math.MaxUint32 {
 			return
 		}
 
-		t.writeQueue.ack(packet.ackId)
+		t.writeQueue.ack(gotPacket.ackId)
 
 		return
 	}
 
-	if repeated, _ := t.lastReadSeqId.incUntil(packet.seqId); repeated {
+	if repeated, _ := t.lastReadSeqId.incUntil(gotPacket.seqId); repeated {
 		return
 	}
 
 	t.ack()
-	t.writeQueue.ack(packet.ackId)
+	t.writeQueue.ack(gotPacket.ackId)
 	t.delayedAcks.Add(1)
 
-	t.readQueue.push(packet)
+	t.readQueue.push(gotPacket)
 }
 
 func (t *tunnel) write() {
@@ -163,9 +163,9 @@ func (t *tunnel) ack() {
 	}
 
 	buff := t.bufferPool.Get().([]byte)
-	packet := newAckPacket(buff)
+	ackPacket := newAckPacket(buff)
 
-	t.writePacket(packet)
+	t.writePacket(ackPacket)
 }
 
 func (t *tunnel) start() {

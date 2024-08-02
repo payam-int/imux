@@ -5,21 +5,21 @@ import (
 	"sync"
 )
 
-var maxSeqWindow = uint16(math.MaxUint16 / 3)
+var maxSeqWindow = uint32(math.MaxUint32 / 3)
 
 func newSequence() *sequence {
 	return &sequence{
-		id:   math.MaxUint16,
+		id:   math.MaxUint32,
 		lock: &sync.Mutex{},
 	}
 }
 
 type sequence struct {
-	id   uint16
+	id   uint32
 	lock *sync.Mutex
 }
 
-func (s *sequence) inc() uint16 {
+func (s *sequence) inc() uint32 {
 	s.lock.Lock()
 	defer s.lock.Unlock()
 
@@ -28,12 +28,12 @@ func (s *sequence) inc() uint16 {
 	return s.id
 }
 
-func (s *sequence) incUntil(nextId uint16) (bool, uint16) {
+func (s *sequence) incUntil(nextId uint32) (bool, uint32) {
 	s.lock.Lock()
 	defer s.lock.Unlock()
 
 	if (s.id <= nextId) && (nextId-s.id) < maxSeqWindow ||
-		(s.id > nextId) && (math.MaxUint16-s.id+nextId) < maxSeqWindow {
+		(s.id > nextId) && (math.MaxUint32-s.id+nextId) < maxSeqWindow {
 
 		s.id = nextId
 
@@ -43,7 +43,7 @@ func (s *sequence) incUntil(nextId uint16) (bool, uint16) {
 	return true, s.id
 }
 
-func (s *sequence) get() uint16 {
+func (s *sequence) get() uint32 {
 	s.lock.Lock()
 	defer s.lock.Unlock()
 

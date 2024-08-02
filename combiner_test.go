@@ -111,12 +111,12 @@ func TestCombineSingleSocket(t *testing.T) {
 	}()
 
 	for i, conn := range servers {
-		err = serverCombiner.SetConn(i, conn)
+		serverCombiner.SetConn(i, conn)
 		assert.NoError(t, err)
 	}
 
 	for i, conn := range clients {
-		err = clientCombiner.SetConn(i, conn)
+		clientCombiner.SetConn(i, conn)
 		assert.NoError(t, err)
 	}
 

@@ -18,7 +18,7 @@ func TestIncUntil(t *testing.T) {
 
 func TestIncUntilLargerThanWindow(t *testing.T) {
 	seq := newSequence()
-	expected := uint16(math.MaxUint16)
+	expected := uint32(math.MaxUint32)
 
 	inc := maxSeqWindow + 1
 	seq.incUntil(inc)

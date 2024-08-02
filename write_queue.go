@@ -31,7 +31,7 @@ type writeQueue struct {
 	channel      chan *packet
 }
 
-func (q *writeQueue) ack(id uint16) {
+func (q *writeQueue) ack(id uint32) {
 	q.lock.Lock()
 	defer q.lock.Unlock()
 

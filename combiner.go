@@ -3,6 +3,7 @@ package imux
 import (
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"os"
 	"sync"
@@ -16,12 +17,12 @@ import (
 //
 // To receive handle connection close event, provide an OnError function within the CombinerConfig.
 func NewCombiner(config CombinerConfig) (*Combiner, error) {
-	if config.PacketSize > 65500 {
-		return nil, fmt.Errorf("packet size must be less than 65500")
+	if config.PacketSize > math.MaxUint32-HeaderSize {
+		return nil, fmt.Errorf("packet size must be less than 42e8")
 	}
 
-	if config.PoolSize*config.WindowSize > 65500 {
-		return nil, fmt.Errorf("poolSize * windowSize must be less than 65500")
+	if config.PoolSize*config.WindowSize > math.MaxUint32 {
+		return nil, fmt.Errorf("poolSize * windowSize must be less than 42e8")
 	}
 
 	onError := func(tunnelId TunnelId, conn net.Conn, err error) {}
@@ -31,7 +32,7 @@ func NewCombiner(config CombinerConfig) (*Combiner, error) {
 
 	bufferPool := &sync.Pool{
 		New: func() any {
-			return make([]byte, config.PacketSize+PacketOverhead)
+			return make([]byte, config.PacketSize+HeaderSize)
 		},
 	}
 
@@ -97,7 +98,7 @@ type CombinerConfig struct {
 type Combiner struct {
 	packetSize     int
 	poolSize       int
-	sequenceId     uint16
+	sequenceId     uint32
 	seqLock        *sync.Mutex
 	readLock       *sync.Mutex
 	writeLock      *sync.Mutex
@@ -328,7 +329,7 @@ func (c *Combiner) GetPoolSize() int {
 	return c.poolSize
 }
 
-func (c *Combiner) nextSequenceId() uint16 {
+func (c *Combiner) nextSequenceId() uint32 {
 	c.seqLock.Lock()
 	defer c.seqLock.Unlock()
 

@@ -7,49 +7,75 @@ import (
 	"io"
 )
 
-const PacketOverhead = 6
+const (
+	CmdNoOp = iota
+	CmdAck  = iota
+)
+
+const (
+	SizeLen  = 4
+	CmdLen   = 2
+	AckIdLen = 4
+	SeqIdLen = 4
+)
+
+const HeaderSize = SizeLen + CmdLen + SeqIdLen + AckIdLen
 
 var ErrInvalidPacketSize = fmt.Errorf("received packet size is less than 6")
 
 func readPacket(reader io.Reader, buff []byte) (*packet, error) {
-
 	// read packet size
-	n, err := io.ReadFull(reader, buff[0:2])
-	if n < 2 {
+	sizeBuff := buff[:SizeLen]
+	n, err := io.ReadFull(reader, sizeBuff)
+	if n < SizeLen {
 		return nil, errors.New("unable to get packet size")
 	}
 	if err != nil {
 		return nil, err
 	}
-	size := binary.LittleEndian.Uint16(buff[0:2])
-	if size < 6 {
+	size := binary.LittleEndian.Uint32(sizeBuff)
+	if size < HeaderSize {
 		return nil, ErrInvalidPacketSize
 	}
 
 	// read sequence id
-	n, err = io.ReadFull(reader, buff[2:4])
-	if n < 2 {
+	cmdBuff := buff[SizeLen : SizeLen+CmdLen]
+	n, err = io.ReadFull(reader, cmdBuff)
+	if n < CmdLen {
+		return nil, errors.New("unable to get cmd")
+	}
+	if err != nil {
+		return nil, err
+	}
+	cmd := binary.LittleEndian.Uint16(cmdBuff)
+
+	// read sequence id
+	seqIdBuff := buff[SizeLen+CmdLen : SizeLen+CmdLen+SeqIdLen]
+	n, err = io.ReadFull(reader, seqIdBuff)
+	if n < SeqIdLen {
 		return nil, errors.New("unable to get seq id")
 	}
 	if err != nil {
 		return nil, err
 	}
-	seqId := binary.LittleEndian.Uint16(buff[2:4])
+	seqId := binary.LittleEndian.Uint32(seqIdBuff)
 
 	// read ack id
-	n, err = io.ReadFull(reader, buff[4:6])
-	if n < 2 {
+	ackIdBuff := buff[SizeLen+CmdLen+SeqIdLen : SizeLen+CmdLen+SeqIdLen+AckIdLen]
+	n, err = io.ReadFull(reader, ackIdBuff)
+	if n < AckIdLen {
 		return nil, errors.New("unable to get ack id")
 	}
 	if err != nil {
 		return nil, err
 	}
-	ackId := binary.LittleEndian.Uint16(buff[4:6])
+	ackId := binary.LittleEndian.Uint32(ackIdBuff)
 
-	if hasData := size > 6; hasData {
-		n, err = io.ReadFull(reader, buff[6:size])
+	// read payload
+	if hasData := size > HeaderSize; hasData {
+		n, err = io.ReadFull(reader, buff[HeaderSize:size])
 		if n < 1 {
-			return nil, errors.New("unable to get payload")
+			return nil, errors.New("unable to get data")
 		}
 		if err != nil {
 			return nil, err
@@ -58,6 +84,7 @@ func readPacket(reader io.Reader, buff []byte) (*packet, error) {
 
 	return &packet{
 		size:  size,
+		cmd:   cmd,
 		seqId: seqId,
 		ackId: ackId,
 		buff:  buff,
@@ -65,31 +92,35 @@ func readPacket(reader io.Reader, buff []byte) (*packet, error) {
 }
 
 func newAckPacket(buff []byte) *packet {
-	binary.LittleEndian.PutUint16(buff[0:2], 6)
-	binary.LittleEndian.PutUint16(buff[2:4], 0)
-	binary.LittleEndian.PutUint16(buff[4:6], 0)
+	binary.LittleEndian.PutUint32(buff[0:SizeLen], HeaderSize)
+	binary.LittleEndian.PutUint16(buff[SizeLen:SizeLen+CmdLen], CmdAck)
+	binary.LittleEndian.PutUint32(buff[SizeLen+CmdLen:SizeLen+CmdLen+SeqIdLen], 0)
+	binary.LittleEndian.PutUint32(buff[SizeLen+CmdLen+SeqIdLen:SizeLen+CmdLen+SeqIdLen+AckIdLen], 0)
 
 	return &packet{
-		size:  6,
+		size:  HeaderSize,
+		cmd:   CmdAck,
 		ackId: 0,
 		buff:  buff,
 	}
 }
 
-func newPacket(buff []byte, seqId uint16, data []byte) *packet {
-	binary.LittleEndian.PutUint16(buff[4:6], 0)
-	binary.LittleEndian.PutUint16(buff[2:4], seqId)
+func newPacket(buff []byte, seqId uint32, data []byte) *packet {
+	binary.LittleEndian.PutUint16(buff[SizeLen:SizeLen+CmdLen], CmdNoOp)
+	binary.LittleEndian.PutUint32(buff[SizeLen+CmdLen:SizeLen+CmdLen+SeqIdLen], seqId)
+	binary.LittleEndian.PutUint32(buff[SizeLen+CmdLen+SeqIdLen:SizeLen+CmdLen+SeqIdLen+AckIdLen], 0)
 
-	size := uint16(6)
+	size := uint32(HeaderSize)
 	if data != nil && len(data) != 0 {
-		copy(buff[6:len(data)+6], data[0:])
-		size += uint16(len(data))
+		copy(buff[HeaderSize:len(data)+HeaderSize], data[0:])
+		size += uint32(len(data))
 	}
 
-	binary.LittleEndian.PutUint16(buff[0:2], size)
+	binary.LittleEndian.PutUint32(buff[0:SizeLen], size)
 
 	return &packet{
 		size:  size,
+		cmd:   CmdNoOp,
 		seqId: seqId,
 		ackId: 0,
 		buff:  buff,
@@ -97,23 +128,24 @@ func newPacket(buff []byte, seqId uint16, data []byte) *packet {
 }
 
 type packet struct {
-	size  uint16
-	seqId uint16
-	ackId uint16
+	size  uint32
+	cmd   uint16
+	seqId uint32
+	ackId uint32
 	buff  []byte
 }
 
-func (p *packet) setAckId(ackId uint16) {
+func (p *packet) setAckId(ackId uint32) {
 	p.ackId = ackId
-	binary.LittleEndian.PutUint16(p.buff[4:6], ackId)
-}
-
-func (p *packet) data() []byte {
-	return p.buff[6:p.size]
+	binary.LittleEndian.PutUint32(p.buff[SizeLen+CmdLen+SeqIdLen:SizeLen+CmdLen+SeqIdLen+AckIdLen], ackId)
 }
 
 func (p *packet) isAck() bool {
-	return p.size <= 6
+	return p.cmd == CmdAck
+}
+
+func (p *packet) data() []byte {
+	return p.buff[HeaderSize:p.size]
 }
 
 func (p *packet) raw() []byte {
