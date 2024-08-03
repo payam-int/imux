@@ -5,34 +5,48 @@ import (
 	"sync/atomic"
 )
 
-func newReadQueue(windowSize int, poolSize int) *readQueue {
+func newReadQueue(packetChan chan *packet, windowSize int, poolSize int) *readQueue {
 	lock := &sync.Mutex{}
 	return &readQueue{
-		orderedPackets: make(chan *packet, windowSize),
-		window:         make([]*packet, poolSize*windowSize),
-		lock:           lock,
-		cond:           sync.NewCond(lock),
-		closed:         &atomic.Bool{},
+		packetChan: packetChan,
+		window:     make([]*packet, poolSize*windowSize),
+		lock:       lock,
+		cond:       sync.NewCond(lock),
+		closed:     &atomic.Bool{},
 	}
 }
 
 type readQueue struct {
-	orderedPackets chan *packet
-	window         []*packet
-	lock           *sync.Mutex
-	cond           *sync.Cond
-	closed         *atomic.Bool
-	nextSeqId      uint32
-	pointer        int
+	packetChan chan *packet
+	window     []*packet
+	lock       *sync.Mutex
+	cond       *sync.Cond
+	closed     *atomic.Bool
+	nextSeqId  uint32
+	pointer    int
 }
 
 func (r *readQueue) start() {
 	go func() {
-		for r.closed.Store(false); !r.closed.Load(); {
-			if sorted := r.trySort(); !sorted {
-				r.lock.Lock()
+		for {
+			r.lock.Lock()
+
+			if r.closed.Load() {
+				close(r.packetChan)
+				return
+			}
+
+			next := r.tryPopSorted()
+			if next != nil {
+				r.cond.Broadcast()
+			} else {
 				r.cond.Wait()
-				r.lock.Unlock()
+			}
+
+			r.lock.Unlock()
+
+			if next != nil {
+				r.packetChan <- next
 			}
 		}
 	}()
@@ -44,28 +58,19 @@ func (r *readQueue) stop() {
 
 	r.closed.Store(true)
 	r.cond.Broadcast()
-
-	close(r.orderedPackets)
 }
 
-func (r *readQueue) trySort() bool {
-	r.lock.Lock()
-
-	packet := r.window[r.pointer]
-	if packet == nil {
-		r.lock.Unlock()
-		return false
+func (r *readQueue) tryPopSorted() *packet {
+	currentPacket := r.window[r.pointer]
+	if currentPacket == nil {
+		return nil
 	}
 
 	r.window[r.pointer] = nil
 	r.pointer = (r.pointer + 1) % len(r.window)
 	r.nextSeqId += 1
-	r.cond.Broadcast()
-	r.lock.Unlock()
 
-	r.orderedPackets <- packet
-
-	return true
+	return currentPacket
 }
 
 func (r *readQueue) push(packet *packet) {
@@ -100,8 +105,4 @@ func (r *readQueue) tryPush(packet *packet) bool {
 	r.cond.Broadcast()
 
 	return true
-}
-
-func (r *readQueue) getReadChan() <-chan *packet {
-	return r.orderedPackets
 }

@@ -189,8 +189,10 @@ func (t *tunnel) start() {
 	}()
 }
 
-func (t *tunnel) stop() {
+func (t *tunnel) stop(deadline time.Time) {
+	_ = t.writeQueue.waitUntilEmpty(deadline)
+	t.writeQueue.stop()
+
 	t.closed.Store(true)
 	t.connCond.Broadcast()
-	t.writeQueue.stop()
 }

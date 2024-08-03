@@ -37,7 +37,8 @@ func NewCombiner(config CombinerConfig) (*Combiner, error) {
 	}
 
 	tunnels := make([]*tunnel, config.PoolSize)
-	sorterQueue := newReadQueue(config.WindowSize, config.PoolSize)
+	packetChan := make(chan *packet, config.WindowSize)
+	sorterQueue := newReadQueue(packetChan, config.WindowSize, config.PoolSize)
 	writeChan := make(chan *packet, config.PoolSize)
 	ackDelay := max(config.WindowSize/2, 1)
 
@@ -47,18 +48,21 @@ func NewCombiner(config CombinerConfig) (*Combiner, error) {
 	}
 
 	combiner := &Combiner{
-		tag:         config.Tag,
-		packetSize:  config.PacketSize,
-		poolSize:    config.PoolSize,
-		onConnError: onError,
-		sorterQueue: sorterQueue,
-		tunnels:     tunnels,
-		seqLock:     &sync.Mutex{},
-		readLock:    &sync.Mutex{},
-		writeLock:   &sync.Mutex{},
-		bufferPool:  bufferPool,
-		writeChan:   writeChan,
-		closed:      &atomic.Bool{},
+		tag:          config.Tag,
+		packetSize:   config.PacketSize,
+		packetChan:   packetChan,
+		poolSize:     config.PoolSize,
+		onConnError:  onError,
+		sorterQueue:  sorterQueue,
+		tunnels:      tunnels,
+		seqLock:      &sync.Mutex{},
+		readLock:     &sync.Mutex{},
+		writeLock:    &sync.Mutex{},
+		bufferPool:   bufferPool,
+		writeChan:    writeChan,
+		closed:       &atomic.Bool{},
+		closing:      &atomic.Bool{},
+		closeTimeout: config.CloseTimeOut,
 	}
 
 	if err := combiner.start(); err != nil {
@@ -90,6 +94,9 @@ type CombinerConfig struct {
 
 	// AckTimeout is the duration to wait for a packet to send before sending an empty packet with ack.
 	AckTimeout time.Duration
+
+	// Maximum deadline for closing a connection
+	CloseTimeOut time.Duration
 }
 
 // Combiner is a net.Conn implementation that distributes data across multiple underlying connections
@@ -106,11 +113,14 @@ type Combiner struct {
 	readDeadline   *time.Time
 	writeDeadline  *time.Time
 	sorterQueue    *readQueue
+	packetChan     chan *packet
 	readingPacket  *packet
 	readingPointer int
 	bufferPool     *sync.Pool
 	writeChan      chan *packet
 	closed         *atomic.Bool
+	closing        *atomic.Bool
+	closeTimeout   time.Duration
 	tag            string
 	onConnError    OnConnErrorFunc
 }
@@ -147,11 +157,17 @@ func (c *Combiner) Read(b []byte) (int, error) {
 				return n, err
 			}
 			if !ok {
+				// it happens when user is still waiting on read but the socket is somehow closed
 				return n, io.ErrClosedPipe
 			}
 
 			c.readingPacket = gotPacket
 			c.readingPointer = 0
+		}
+
+		if c.readingPacket.isClose() {
+			_ = c.Close()
+			break
 		}
 
 		unreadPayload := c.readingPacket.data()[c.readingPointer:]
@@ -177,7 +193,7 @@ func (c *Combiner) Read(b []byte) (int, error) {
 func (c *Combiner) readUntilDeadline(deadline *time.Time) (packet *packet, ok bool, err error) {
 	if deadline == nil {
 		select {
-		case packet, ok = <-c.sorterQueue.getReadChan():
+		case packet, ok = <-c.packetChan:
 		}
 
 		return
@@ -187,7 +203,7 @@ func (c *Combiner) readUntilDeadline(deadline *time.Time) (packet *packet, ok bo
 	defer idleDelay.Stop()
 
 	select {
-	case packet, ok = <-c.sorterQueue.getReadChan():
+	case packet, ok = <-c.packetChan:
 	case <-idleDelay.C:
 		err = os.ErrDeadlineExceeded
 		return
@@ -198,7 +214,7 @@ func (c *Combiner) readUntilDeadline(deadline *time.Time) (packet *packet, ok bo
 
 // Write implements the net.Conn interface and behaves identically to net.Conn.Write.
 func (c *Combiner) Write(b []byte) (n int, err error) {
-	if c.closed.Load() {
+	if c.closing.Load() {
 		return 0, io.ErrClosedPipe
 	}
 
@@ -209,7 +225,7 @@ func (c *Combiner) Write(b []byte) (n int, err error) {
 	pointerStart := 0
 
 	for {
-		if c.closed.Load() {
+		if c.closing.Load() {
 			return 0, io.ErrClosedPipe
 		}
 
@@ -219,9 +235,9 @@ func (c *Combiner) Write(b []byte) (n int, err error) {
 		buff := c.bufferPool.Get().([]byte)
 		seqId := c.nextSequenceId()
 
-		packet := newPacket(buff, seqId, packetData)
+		nextPacket := newPacket(buff, seqId, packetData)
 
-		if err := c.writeUntilDeadline(packet, deadline); err != nil {
+		if err := c.writeUntilDeadline(nextPacket, deadline); err != nil {
 			return pointerStart, err
 		}
 
@@ -255,19 +271,27 @@ func (c *Combiner) writeUntilDeadline(packet *packet, deadline *time.Time) error
 
 // Close implements the net.Conn interface and behaves identically to net.Conn.Close.
 func (c *Combiner) Close() error {
-	c.readLock.Lock()
-	defer c.readLock.Unlock()
+	if c.closing.Load() {
+		return nil
+	}
+
+	c.closing.Store(true)
+
+	buff := c.bufferPool.Get().([]byte)
+	closePacket := newClosePacket(buff)
 
 	c.writeLock.Lock()
 	defer c.writeLock.Unlock()
 
+	closeUntil := time.Now().Add(c.closeTimeout)
+	_ = c.writeUntilDeadline(closePacket, &closeUntil)
+	close(c.writeChan)
+
 	c.sorterQueue.stop()
 
-	for _, tunnel := range c.tunnels {
-		tunnel.stop()
+	for _, tun := range c.tunnels {
+		tun.stop(closeUntil)
 	}
-
-	close(c.writeChan)
 
 	return nil
 }

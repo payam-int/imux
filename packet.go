@@ -10,6 +10,7 @@ import (
 const (
 	CmdNoOp = iota
 	CmdAck  = iota
+	CmdClose
 )
 
 const (
@@ -105,6 +106,20 @@ func newAckPacket(buff []byte) *packet {
 	}
 }
 
+func newClosePacket(buff []byte) *packet {
+	binary.LittleEndian.PutUint32(buff[0:SizeLen], HeaderSize)
+	binary.LittleEndian.PutUint16(buff[SizeLen:SizeLen+CmdLen], CmdClose)
+	binary.LittleEndian.PutUint32(buff[SizeLen+CmdLen:SizeLen+CmdLen+SeqIdLen], 0)
+	binary.LittleEndian.PutUint32(buff[SizeLen+CmdLen+SeqIdLen:SizeLen+CmdLen+SeqIdLen+AckIdLen], 0)
+
+	return &packet{
+		size:  HeaderSize,
+		cmd:   CmdClose,
+		ackId: 0,
+		buff:  buff,
+	}
+}
+
 func newPacket(buff []byte, seqId uint32, data []byte) *packet {
 	binary.LittleEndian.PutUint16(buff[SizeLen:SizeLen+CmdLen], CmdNoOp)
 	binary.LittleEndian.PutUint32(buff[SizeLen+CmdLen:SizeLen+CmdLen+SeqIdLen], seqId)
@@ -142,6 +157,10 @@ func (p *packet) setAckId(ackId uint32) {
 
 func (p *packet) isAck() bool {
 	return p.cmd == CmdAck
+}
+
+func (p *packet) isClose() bool {
+	return p.cmd == CmdClose
 }
 
 func (p *packet) data() []byte {

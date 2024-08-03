@@ -1,8 +1,10 @@
 package imux
 
 import (
+	"os"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 func newWriteQueue(windowSize int, writeChannel chan *packet) *writeQueue {
@@ -155,5 +157,36 @@ func (q *writeQueue) start() {
 }
 
 func (q *writeQueue) stop() {
+	q.lock.Lock()
+	defer q.lock.Unlock()
+
 	q.cond.Broadcast()
+}
+
+func (q *writeQueue) waitUntilEmpty(deadline time.Time) error {
+	q.lock.Lock()
+	defer q.lock.Unlock()
+
+	duration := max(deadline.Sub(time.Now()), 1)
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+
+	go func() {
+		select {
+		case <-timer.C:
+			q.cond.Broadcast()
+		}
+	}()
+
+	for {
+		if len(q.elements) == 0 {
+			return nil
+		}
+
+		if time.Now().After(deadline) {
+			return os.ErrDeadlineExceeded
+		}
+
+		q.cond.Wait()
+	}
 }
